@@ -1,0 +1,214 @@
+---
+title: "Practical Machine learning project"
+author: "M. Y. Cheong"
+date: "27 January, 2016"
+
+output: html_document
+---
+
+##Background
+
+The goal of this project is to implementing a machine learning algorithm for predicting if a subject is performing weight lifting exercise correctly. 
+
+The Weight Lifting Exercises (WLE) dataset (source: http://groupware.les.inf.puc-rio.br/har) is used in the project. The dataset was collected by recording signals from wearable sensors while the subjects perform weight lifting activities. Six young healthy participants were asked to perform one set of 10 repetitions of the Unilateral Dumbbell Biceps Curl in five different fashions: exactly according to the specification (Class A), throwing the elbows to the front (Class B), lifting the dumbbell only halfway (Class C), lowering the dumbbell only halfway (Class D) and throwing the hips to the front (Class E). Class A corresponds to the specified execution of the exercise, while the other 4 classes correspond to common mistakes. More information about the WLE dataset can be found in [1], or visit <http://groupware.les.inf.puc-rio.br/har#ixzz3xhadU0A4>. The training data can be dowloaded here <https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv>
+
+The WLE training dataset consists of 160 variables and 19622 observations of the variables. The "classe" variable in the training set (values are A, B, C, D or E) is the outcome that the algorithm should predict. The training dataset is partitioned into 2 parts. A 75\% portion is used for model training and cross validation and a 25\% portion as test data for estimating the out-of-sample error. The final chosen algorithm is then applied for predicting the outcome of the 20 test cases. The test data can be downloaded here : <https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv>  
+
+
+The caret package is used in this project for building and evaluation of the machine learning algorithms. 
+
+
+## Features selection and model training
+
+#### Data cleaning  
+
+Some exploratory analysis on the training dataset shows that columns 1 to 7 consist of variables not directly obtained from the wearable sensors. Various plots showing the relationship of these variables to the "classe" variables are investigated. 
+
+Here, 3 of the plots are shown. The first plot shows that variable "X" in column 1 is some indexing for dataset which is sorted by the "classe" variable. Columns 2 to 7 consist of timestamps and measurement window related data. By plotting variables against any sensor measured variable and group by "classe", they do not show meaningful correlation to "classe". It seems more like it indicates the different time the subjects are performing the exercises. 
+
+**Based on these findings, columns 1 to 7 are manually dropped from the features set**.
+
+```{r, echo=F, warning=FALSE, message=FALSE}
+library(caret)
+dataTrain <- read.csv("pml-training.csv")
+
+set.seed(1771)
+trainInd <- createDataPartition(dataTrain$classe, p=0.75, list=F)
+
+xTrain <- dataTrain[trainInd,]
+xTest <- dataTrain[-trainInd,]
+```
+<!-- For figure caption and referencing 
+```{r functions, include=FALSE}
+# A function for captioning and referencing images
+fig <- local({
+    i <- 0
+    ref <- list()
+    list(
+        cap=function(refName, text) {
+            i <<- i + 1
+            ref[[refName]] <<- i
+            paste("Figure ", i, ": ", text, sep="")
+        },
+        ref=function(refName) {
+            ref[[refName]]
+        })
+})
+```
+-->
+
+```{r, echo=FALSE, fig.width=9.5, fig.height=3, dev="svg"}
+#fig.cap=fig$cap("TimestampWin", "'Timestamps' and 'Window' variables")
+  
+p1 <- qplot(strptime(cvtd_timestamp, "%d/%m/%Y %H:%M"), total_accel_arm, colour=user_name, data=xTrain, main="Example timestamp vs. a sensor \n measured values", xlab="cvtd_timestamp", cex.main=0.1, cex.lab=0.2) + theme(axis.text.x= element_blank(), plot.title = element_text(size=10), axis.title.x=element_text(size=10), axis.title.y=element_text(size=10))
+
+#p2 <-qplot(strptime(xTrain$cvtd_timestamp, "%d/%m/%Y %H:%M"), classe, data=xTrain, colour=user_name, xaxt="n", xlab="cvtd_timestamp")
+#p2<-qplot(raw_timestamp_part_2, classe, data=xTrain)
+
+p3<-qplot(num_window, total_accel_arm, data=xTrain, colour=classe , main="Example num_window vs. a sensor \n measured values") + theme(plot.title = element_text(size=10), axis.title.x=element_text(size=10), axis.title.y=element_text(size=10))
+ 
+#p4 <- qplot(X, colour=classe, data=xTrain, geom = "density", main="Density of X by 'classe'")+ theme(plot.title = element_text(size=10), axis.text.x= element_blank(), axis.title.y=element_text(size=10))
+
+p4 <- qplot(c(1:14718), X, colour=classe, data=xTrain, main="Index of X vs. X \n by 'classe'", xlab="Index of X", ylab="X")+ theme(plot.title = element_text(size=10), axis.text.x=element_text(size=10), axis.title.y=element_text(size=10))
+
+library(grid)
+library(gridExtra)
+
+grid.arrange(p4, p1, p3, ncol=3)
+
+```
+<!-- Manually remove cols 2:7 
+and convert factor variables to numeric -->
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+
+xTrain2 <- xTrain[, c(-2,-3,-4, -5, -6, -7)]
+xTest2 <-  xTest[, c(-2,-3,-4, -5, -6, -7)]
+
+for (i in (1:(ncol(xTrain2)-1)))
+{
+  if ( class(xTrain2[,i])=="factor" )
+  {
+    xTrain2[,i] <- as.numeric(as.character(xTrain2[,i]))
+  }
+  if ( class(xTest2[,i])=="factor" )
+  {
+    xTest2[,i] <- as.numeric(as.character(xTest2[,i]))
+  }
+}
+# Find percentage of NAs in each column 
+# so that predictors with more than 70% of NAs can be removed.
+#
+nNA <- NULL
+
+for (i in 1:ncol(xTrain2))
+{
+  nNA[i] <- sum(is.na(xTrain2[,i]))
+}
+NAcol <- which(nNA/nrow(xTrain2)>0.7)
+
+xTrain_man <- xTrain2[,-NAcol]
+xTest_man <- xTest2[,-NAcol]
+
+# Without removing the sparse columns, find near zero variance variables and remove them
+#
+# preProcNZV <- preProcess(xTrain2[,-ncol(xTrain2)], method="nzv")
+# xTrainPPnzv <- predict(preProcNZV, xTrain2[,-ncol(xTrain2)])
+
+```
+<!-- For further process of feature selection...
+Convert factor to numeric; Analysis using nzv and find percentage of NAs in affected columns
+!!** nzv preprocessing doesn't work well with NAs in every row. 
+----------------->
+
+#### Dealing with missing values
+
+Many of the remaining variables are of class 'factor' but values are 'numeric'. In addition, some seem to be sparse (with many missing values and #DIV/0!). There are two considerations dealing with these sparse columns. One is to find out how sparse and another is whether some are still significant despite the sparsity. These variables are first converted to numeric (using `as.numeric(as.character()`), so that missing entry is given value 'NA'. 
+<!--It also makes it possible to preprocess with `method=nzv` for further analysis of the dataset (preprocess with nzv does not analyze factor variables).    
+-->
+
+To address the first question, the percentage of 'NA's in each columns are calculated. A hundred columns were found to have more than 98\% of 'NA's. With such high percentage of missing values it's too sparse to consider these variables. These **100 columns are removed, leaving the dataset with 53 variables**, including the classe variable. Further analysis on near-zero variance found no nzv variables. This dataset is then use for model building.  
+
+<!--
+Model building and comparison code here!
+-->
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+
+library(parallel)
+library(doParallel)
+cluster <- makeCluster(detectCores() - 1) # convention to leave 1 core for OS
+registerDoParallel(cluster)
+
+trCtrl <- trainControl(method="cv", number=8, allowParallel = T) 
+
+Model_tree <- train(xTrain_man$classe~., method="rpart", data=xTrain_man[,c(-1, -54)], trControl=trCtrl)
+
+Model_treebag <- train(xTrain_man$classe~., method="treebag", data=xTrain_man[,c(-1, -54)], trControl=trCtrl)
+
+Model_treebag1 <- train(xTrain_man$classe~., method="treebag", data=xTrain_man[,c(-1, -54)], preProcess="pca", trControl=trCtrl)
+
+Model_rf <- train(xTrain_man$classe~., method="rf", data=xTrain_man[,c(-1,-54)], trControl=trCtrl)
+
+confMatTree <- confusionMatrix(xTest_man$classe, predict(Model_tree, xTest_man[,c(-1,-54)]))
+
+confMatTbag <- confusionMatrix(xTest_man$classe, predict(Model_treebag, xTest_man[,c(-1,-54)]))
+
+confMatTbag1 <- confusionMatrix(xTest_man$classe, predict(Model_treebag1, xTest_man[,c(-1, -54)]))
+
+confMatRF <- confusionMatrix(xTest_man$classe, predict(Model_rf, xTest_man[,c(-1,-54)]))
+
+stopCluster(cluster)  # de-register the parallel processing cluster 
+
+```
+
+#### Model training and cross validation
+
+The above cleaned training dataset is used for building the machine learning algorithm. As the prediction of 'classe' is a classification problem, linear regression is not considered. Classification by tree and random forest are considered in project. Four cases were considered and all cases employ k-fold cross validation (cv), with k=8, and the data split for cv is 75\%-25\% (default value of trainControl, p=0.75). 
+
+- Case 1 : Classification tree 
+- Case 2 : Bagging classification trees (25 bootstrap replication) 
+- Case 3 : Bagging classification trees (25 bootstrap replication) and preprocessed with pca
+- Case 4 : Random forest 
+
+The trained model performance of each case with 8-fold cv are as follow.
+```{r, message=FALSE, warning=FALSE}
+Model_tree
+Model_treebag
+Model_treebag1   # with pca
+Model_rf
+```
+The plain classification tree shows a prediction accuracy of only `r format(max(Model_tree$results$Accuracy)*100, digits=6)`\%. Preprocessing with principle component analysis (pca), which results in 25 principle components, did not improve prediction accuracy for the bagged tree method but instead deteriorate. The bagged classification tree and random forest models give accuracy of `r format(max(Model_treebag$results$Accuracy)*100, digits=6)`\% and `r format(max(Model_rf$results$Accuracy)*100, digits=6)`\%, respectively. Thus, the treebag (case 2) and random forest (case 4) are tested on the test data (the 25\% of training data) to estimate the out-of-sample error.  
+
+#### Out-of-sample test
+
+Following are the confusion matrices of the bagged classification and random forest algorithms on predicting the output from the test portion of the training data.
+
+```{r, message=FALSE, warning=FALSE}
+confMatTbag
+confMatRF
+```
+
+As expected, from the confusion matrices, the random forest algorithm gives a higher accuracy of `r format(confMatRF$overall[1]*100, digits=4)`\% compared to `r format(confMatTbag$overall[1]*100, digits=4)`\% of the bagged tree classification method. The **estimated out-of-sample error**, calculated as `(1- Accuracy)*100`\%, for the bagged tree and random forest algorithms are **`r format((1-confMatTbag$overall[1])*100, digits=4)`\%** and **`r format((1-confMatRF$overall[1])*100, digits=4)`\%**, respectively. Based on this, the random forest algorithm is going to be used for predicting the 20 test cases for the quiz.
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+dataTest <- read.csv("pml-testing.csv")
+dataTest1 <- dataTest[,c(-2,-3,-4,-5,-6,-7)]
+dataTest1 <- dataTest1[,-NAcol]
+dataTest1 <- dataTest1[,-1]
+
+pred <- predict(Model_rf, dataTest1)
+```
+
+#### Final results
+
+The random forest machine learning is used to predict the 20 test cases of the Coursera Practical Machine Learning quiz. The following prediction of the 20 cases are submitted and the algorithm has **predicted all 20 cases correctly**.
+
+`r pred`
+
+
+
+
+**Reference**
+
+[1] Velloso, E.; Bulling, A.; Gellersen, H.; Ugulino, W.; Fuks, H. Qualitative Activity Recognition of Weight Lifting Exercises. Proceedings of 4th International Conference in Cooperation with SIGCHI (Augmented Human '13) . Stuttgart, Germany: ACM SIGCHI, 2013.
+
